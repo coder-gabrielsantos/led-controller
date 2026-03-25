@@ -52,6 +52,7 @@ class LEDControllerApp(ctk.CTk):
         self._search_generation = 0
         self._search_anim_step = 0
         self._search_anim_job = None
+        self._was_connected = False
         self.stop_watchdog = False
 
         self.setup_ui()
@@ -193,6 +194,7 @@ class LEDControllerApp(ctk.CTk):
         if self._search_anim_job:
             self.after_cancel(self._search_anim_job)
             self._search_anim_job = None
+        self._was_connected = False
         self._search_anim_step = 0
         self._animate_search_status()
 
@@ -200,6 +202,7 @@ class LEDControllerApp(ctk.CTk):
         if self._search_anim_job:
             self.after_cancel(self._search_anim_job)
             self._search_anim_job = None
+        self._was_connected = True
         port = self.arduino.port or "?"
         self.status_indicator.configure(text=f"● ONLINE | {port}", text_color="#32d74b")
 
@@ -207,13 +210,21 @@ class LEDControllerApp(ctk.CTk):
     def start_watchdog(self):
         def watch():
             while not self.stop_watchdog:
-                if self.arduino.connection and not self.arduino.verify_still_plugged():
+                connected_now = False
+                if self.arduino.is_connected():
+                    connected_now = self.arduino.verify_still_plugged()
+
+                if connected_now:
+                    self._was_connected = True
+                elif self._was_connected:
+                    self._was_connected = False
                     self.after(0, self.handle_disconnection)
                 time.sleep(1.0)
 
         threading.Thread(target=watch, daemon=True).start()
 
     def handle_disconnection(self):
+        self._was_connected = False
         self.arduino.close()
         if self.active_mode_obj:
             self.active_mode_obj.stop()
