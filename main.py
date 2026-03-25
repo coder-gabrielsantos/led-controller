@@ -54,6 +54,10 @@ class LEDControllerApp(ctk.CTk):
         self._search_anim_job = None
         self._was_connected = False
         self.stop_watchdog = False
+        self._ui_thread_id = threading.get_ident()
+        self._led_update_lock = threading.Lock()
+        self._pending_led_updates = {}
+        self._led_flush_job = None
 
         self.setup_ui()
         self.slider.set(100)
@@ -121,15 +125,35 @@ class LEDControllerApp(ctk.CTk):
             self.led_drawings.append(rect)
 
     def update_led_canvas(self, led_id, color_hex):
-        """Metodo de alta performance para atualizar o canvas"""
-        if 0 <= led_id < self.num_leds:
+        """Atualiza canvas de forma segura para chamadas vindas de threads."""
+        if not (0 <= led_id < self.num_leds):
+            return
+        if threading.get_ident() == self._ui_thread_id:
             self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
+            return
+
+        with self._led_update_lock:
+            self._pending_led_updates[led_id] = color_hex
+            if self._led_flush_job is None:
+                self._led_flush_job = self.after_idle(self.flush_pending_led_updates)
+
+    def flush_pending_led_updates(self):
+        with self._led_update_lock:
+            updates = self._pending_led_updates
+            self._pending_led_updates = {}
+            self._led_flush_job = None
+
+        for led_id, color_hex in updates.items():
+            if 0 <= led_id < self.num_leds:
+                self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
 
     def clear_led_simulator(self):
         """Volta o simulador ao estado inicial (LEDs apagados)."""
         if len(self.led_drawings) != self.num_leds:
             return
         off = "#1a1a1a"
+        with self._led_update_lock:
+            self._pending_led_updates = {}
         for i in range(self.num_leds):
             self.led_canvas.itemconfig(self.led_drawings[i], fill=off)
 
@@ -228,6 +252,7 @@ class LEDControllerApp(ctk.CTk):
         self.arduino.close()
         if self.active_mode_obj:
             self.active_mode_obj.stop()
+        self.clear_led_simulator()
         self.auto_connect()
 
     def auto_connect(self):
@@ -247,7 +272,7 @@ class LEDControllerApp(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def update_brightness(self, value):
-        if self.arduino.is_connected(): self.arduino.send_command(254, int(value))
+        self.arduino.set_brightness(int(value))
 
     def select_mode(self, mode_name, mode_obj):
         # Desliga o modo anterior

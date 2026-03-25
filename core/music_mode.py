@@ -1,5 +1,6 @@
 import threading
 import time
+import warnings
 
 import numpy as np
 
@@ -24,6 +25,14 @@ def _fromstring_compat(*args, **kwargs):
 np.fromstring = _fromstring_compat
 import soundcard as sc
 
+# Evita flood de warnings conhecidos do loopback no backend MediaFoundation.
+if hasattr(sc, "SoundcardRuntimeWarning"):
+    warnings.filterwarnings(
+        "ignore",
+        message="data discontinuity in recording",
+        category=sc.SoundcardRuntimeWarning,
+    )
+
 
 class MusicMode:
     def __init__(self, arduino):
@@ -36,6 +45,10 @@ class MusicMode:
         self.sample_rate = 48000
         # Menor bloco = menor latência visual (mais responsivo às batidas).
         self.block_size = 1024
+        self.serial_fps = 35
+        self.ui_fps = 24
+        self._next_serial_ts = 0.0
+        self._next_ui_ts = 0.0
         self._window = np.hanning(self.block_size)
         self._band_bin_ranges = self._build_band_ranges()
         self._band_weight = np.linspace(1.25, 0.95, self.num_leds, dtype=np.float32)
@@ -136,6 +149,8 @@ class MusicMode:
         self._beat_pulse = 0.0
         self._prev_above_floor.fill(0.0)
         self._energy_ema = 0.0
+        self._next_serial_ts = 0.0
+        self._next_ui_ts = 0.0
 
     def _render_loop(self):
         try:
@@ -319,13 +334,21 @@ class MusicMode:
                     if not self.running:
                         break
 
-                    if self.arduino and self.arduino.is_connected():
-                        self.arduino.send_full_frame(pixels)
+                    now = time.perf_counter()
 
-                    if self.ui_callback:
+                    if (
+                        self.arduino
+                        and self.arduino.is_connected()
+                        and now >= self._next_serial_ts
+                    ):
+                        self.arduino.send_full_frame(pixels)
+                        self._next_serial_ts = now + (1.0 / max(1, self.serial_fps))
+
+                    if self.ui_callback and now >= self._next_ui_ts:
                         for i in range(self.num_leds):
                             r, g, b = map(int, pixels[i])
                             self.ui_callback(i, f"#{r:02x}{g:02x}{b:02x}")
+                        self._next_ui_ts = now + (1.0 / max(1, self.ui_fps))
 
                     # recorder.record já bloqueia por bloco; evitar sleep extra reduz latência.
         except Exception as e:

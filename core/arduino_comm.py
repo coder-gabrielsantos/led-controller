@@ -6,6 +6,7 @@ import time
 
 
 NUM_LEDS = 88
+DEFAULT_MAX_BRIGHTNESS_PERCENT = 65
 
 # Descrição / fabricante típicos de Arduino e adaptadores USB-serial
 _PORT_KEYWORDS = (
@@ -32,6 +33,13 @@ class ArduinoComm:
         self.port = None
         env = os.environ.get("ARDUINO_BAUD")
         self.baudrate = int(env) if env else baudrate
+        max_env = os.environ.get("LED_MAX_BRIGHTNESS_PERCENT")
+        try:
+            self.max_brightness_percent = int(max_env) if max_env else DEFAULT_MAX_BRIGHTNESS_PERCENT
+        except ValueError:
+            self.max_brightness_percent = DEFAULT_MAX_BRIGHTNESS_PERCENT
+        self.max_brightness_percent = max(1, min(100, self.max_brightness_percent))
+        self.brightness_percent = self.max_brightness_percent
         self.connection = None
         # RLock evita deadlock quando métodos com lock chamam outros métodos com lock.
         self._io_lock = threading.RLock()
@@ -125,11 +133,12 @@ class ArduinoComm:
             if not self.connection or not self.connection.is_open:
                 return
             try:
+                factor = self.brightness_percent / 100.0
                 packet = bytearray()
                 for r, g, b in pixel_data:
-                    packet.append(int(max(0, min(255, r))))
-                    packet.append(int(max(0, min(255, g))))
-                    packet.append(int(max(0, min(255, b))))
+                    packet.append(int(max(0, min(255, r * factor))))
+                    packet.append(int(max(0, min(255, g * factor))))
+                    packet.append(int(max(0, min(255, b * factor))))
                 self.connection.write(packet)
             except (OSError, serial.SerialException) as e:
                 print(f"Erro de transmissão: {e}")
@@ -139,6 +148,14 @@ class ArduinoComm:
                     pass
                 self.connection = None
                 self.port = None
+
+    def set_brightness(self, percent):
+        """
+        Define brilho global no lado do PC.
+        O valor é limitado por max_brightness_percent para proteger fonte/fita.
+        """
+        pct = int(max(0, min(100, percent)))
+        self.brightness_percent = min(pct, self.max_brightness_percent)
 
     def clear_leds(self):
         """Apaga todos os LEDs (frame RGB preto)."""
