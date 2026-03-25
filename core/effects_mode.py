@@ -7,6 +7,7 @@ class EffectsMode:
     def __init__(self, arduino):
         self.arduino = arduino
         self.running = False
+        self._render_thread = None
         self.ui_callback = None
         self.num_leds = 88
         self.offset = 0.0  # Controla o movimento do arco-íris
@@ -17,10 +18,15 @@ class EffectsMode:
     def start(self):
         if not self.running:
             self.running = True
-            threading.Thread(target=self.render_loop, daemon=True).start()
+            self._render_thread = threading.Thread(target=self.render_loop, daemon=True)
+            self._render_thread.start()
 
     def stop(self):
         self.running = False
+        current = threading.current_thread()
+        if self._render_thread and self._render_thread.is_alive() and self._render_thread is not current:
+            self._render_thread.join(timeout=0.2)
+        self.offset = 0.0
 
     def hsv_to_rgb(self, h, s, v):
         """Converte cores de HSV para RGB para o efeito arco-íris."""
@@ -61,6 +67,8 @@ class EffectsMode:
                     self.ui_callback(i, color_hex)
 
             # Envia o frame completo para o Arduino (Otimizado)
+            if not self.running:
+                break
             if self.arduino and self.arduino.is_connected():
                 self.arduino.send_full_frame(pixel_data)
 

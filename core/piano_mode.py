@@ -8,6 +8,8 @@ class PianoMode:
     def __init__(self, arduino):
         self.arduino = arduino
         self.running = False
+        self._midi_thread = None
+        self._render_thread = None
         self.ui_callback = None
         self.num_leds = 88
 
@@ -26,11 +28,22 @@ class PianoMode:
     def start(self):
         if not self.running:
             self.running = True
-            threading.Thread(target=self.midi_listen, daemon=True).start()
-            threading.Thread(target=self.render_loop, daemon=True).start()
+            self._midi_thread = threading.Thread(target=self.midi_listen, daemon=True)
+            self._render_thread = threading.Thread(target=self.render_loop, daemon=True)
+            self._midi_thread.start()
+            self._render_thread.start()
 
     def stop(self):
         self.running = False
+        current = threading.current_thread()
+        if self._midi_thread and self._midi_thread.is_alive() and self._midi_thread is not current:
+            self._midi_thread.join(timeout=0.2)
+        if self._render_thread and self._render_thread.is_alive() and self._render_thread is not current:
+            self._render_thread.join(timeout=0.2)
+        self.pressed_keys.clear()
+        self.active_effects.clear()
+        for i in range(self.num_leds):
+            self.pixel_data[i] = [0.0, 0.0, 0.0]
 
     def get_lerp_color(self, velocity):
         v = velocity / 127.0
@@ -50,6 +63,8 @@ class PianoMode:
             with mido.open_input(input_names[0]) as inport:
                 while self.running:
                     for msg in inport.iter_pending():
+                        if not self.running:
+                            break
                         # FILTRO: Ignora Sustain (CC 64) e outros controles
                         if msg.type == 'control_change' or msg.is_meta:
                             continue
@@ -120,6 +135,8 @@ class PianoMode:
                     self.pixel_data[idx] = [255.0, 255.0, 255.0]
 
             # --- 5. ENVIO PARA ARDUINO E UI ---
+            if not self.running:
+                break
             if self.arduino and self.arduino.is_connected():
                 self.arduino.send_full_frame(self.pixel_data)
 

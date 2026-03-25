@@ -49,7 +49,9 @@ class LEDControllerApp(ctk.CTk):
 
         self.active_mode_obj = None
         self.buttons = {}
-        self.is_connecting = False
+        self._search_generation = 0
+        self._search_anim_step = 0
+        self._search_anim_job = None
         self.stop_watchdog = False
 
         self.setup_ui()
@@ -66,8 +68,8 @@ class LEDControllerApp(ctk.CTk):
         self.top_bar = ctk.CTkFrame(self, fg_color="transparent")
         self.top_bar.pack(fill="x", padx=40, pady=(35, 0))
 
-        self.status_indicator = ctk.CTkLabel(self.top_bar, text="● INITIALIZING",
-                                             font=("Nunito", 11, "bold"), text_color="gray40")
+        self.status_indicator = ctk.CTkLabel(self.top_bar, text="● SEARCHING",
+                                             font=("Nunito", 11, "bold"), text_color="#ff9f0a")
         self.status_indicator.pack(side="left")
 
         ctk.CTkLabel(self, text="LED CONTROLLER SYSTEM",
@@ -122,6 +124,21 @@ class LEDControllerApp(ctk.CTk):
         if 0 <= led_id < self.num_leds:
             self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
 
+    def clear_led_simulator(self):
+        """Volta o simulador ao estado inicial (LEDs apagados)."""
+        if len(self.led_drawings) != self.num_leds:
+            return
+        off = "#1a1a1a"
+        for i in range(self.num_leds):
+            self.led_canvas.itemconfig(self.led_drawings[i], fill=off)
+
+    def clear_all_leds(self):
+        if self.arduino.is_connected():
+            self.arduino.clear_leds()
+            time.sleep(0.03)
+            self.arduino.clear_leds()
+        self.clear_led_simulator()
+
     def create_mode_card(self, name, icon_path, col, mode_obj):
         try:
             img = ctk.CTkImage(Image.open(icon_path), size=(48, 48))
@@ -155,40 +172,68 @@ class LEDControllerApp(ctk.CTk):
 
     def quit_application(self, icon=None, item=None):
         self.stop_watchdog = True
+        if self._search_anim_job:
+            self.after_cancel(self._search_anim_job)
+            self._search_anim_job = None
         if self.active_mode_obj: self.active_mode_obj.stop()
         self.arduino.close();
         self.tray_icon.stop();
         self.destroy();
         sys.exit()
 
+    def _animate_search_status(self):
+        if self.stop_watchdog:
+            return
+        dots = "." * ((self._search_anim_step % 3) + 1)
+        self.status_indicator.configure(text=f"● SEARCHING{dots}", text_color="#ff9f0a")
+        self._search_anim_step += 1
+        self._search_anim_job = self.after(350, self._animate_search_status)
+
+    def set_status_searching(self):
+        if self._search_anim_job:
+            self.after_cancel(self._search_anim_job)
+            self._search_anim_job = None
+        self._search_anim_step = 0
+        self._animate_search_status()
+
+    def set_status_online(self):
+        if self._search_anim_job:
+            self.after_cancel(self._search_anim_job)
+            self._search_anim_job = None
+        port = self.arduino.port or "?"
+        self.status_indicator.configure(text=f"● ONLINE | {port}", text_color="#32d74b")
+
     # --- Watchdog de Conexao ---
     def start_watchdog(self):
         def watch():
             while not self.stop_watchdog:
-                if self.arduino.connection and not self.arduino.is_connected():
-                    self.handle_disconnection()
-                time.sleep(2)
+                if self.arduino.connection and not self.arduino.verify_still_plugged():
+                    self.after(0, self.handle_disconnection)
+                time.sleep(1.0)
 
         threading.Thread(target=watch, daemon=True).start()
 
     def handle_disconnection(self):
         self.arduino.close()
-        if self.active_mode_obj: self.active_mode_obj.stop()
-        self.status_indicator.configure(text="● CONNECTION LOST", text_color="#ff453a")
+        if self.active_mode_obj:
+            self.active_mode_obj.stop()
         self.auto_connect()
 
     def auto_connect(self):
-        if not self.is_connecting:
-            self.is_connecting = True
-            threading.Thread(target=self.perform_connection, daemon=True).start()
+        """Procura Arduino em loop; cancela buscas antigas ao incrementar _search_generation."""
+        self._search_generation += 1
+        gen = self._search_generation
 
-    def perform_connection(self):
-        while self.is_connecting and not self.stop_watchdog:
-            if self.arduino.connect():
-                self.is_connecting = False
-                self.status_indicator.configure(text=f"● ONLINE | {self.arduino.port}", text_color="#32d74b")
-                break
-            time.sleep(2)
+        def worker():
+            self.after(0, self.set_status_searching)
+            while not self.stop_watchdog and gen == self._search_generation:
+                if self.arduino.connect():
+                    if gen == self._search_generation:
+                        self.after(0, self.set_status_online)
+                    return
+                time.sleep(0.75)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def update_brightness(self, value):
         if self.arduino.is_connected(): self.arduino.send_command(254, int(value))
@@ -197,6 +242,8 @@ class LEDControllerApp(ctk.CTk):
         # Desliga o modo anterior
         if self.active_mode_obj:
             self.active_mode_obj.stop()
+
+        self.clear_all_leds()
 
         # Limpa o visual dos botoes
         for btn in self.buttons.values():
