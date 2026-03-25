@@ -45,7 +45,7 @@ class LEDControllerApp(ctk.CTk):
         # CONFIGURAÇÃO CRUCIAL: Todos os modos precisam do callback da UI
         self.piano.set_callback(self.update_led_canvas)
         self.effects.set_callback(self.update_led_canvas)
-        # self.music.set_callback(self.update_led_canvas) # Ative quando criar o music_mode
+        self.music.set_callback(self.update_led_canvas)
 
         self.active_mode_obj = None
         self.buttons = {}
