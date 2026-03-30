@@ -50,6 +50,7 @@ class MusicMode:
         self.ui_fps = 24
         self._next_serial_ts = 0.0
         self._next_ui_ts = 0.0
+        self._red_hold_until = 0.0
         self._window = np.hanning(self.block_size)
         self._band_bin_ranges = self._build_band_ranges()
         self._band_weight = np.linspace(1.25, 0.95, self.num_leds, dtype=np.float32)
@@ -154,6 +155,7 @@ class MusicMode:
         self._energy_ema = 0.0
         self._next_serial_ts = 0.0
         self._next_ui_ts = 0.0
+        self._red_hold_until = 0.0
 
     def _render_loop(self):
         try:
@@ -225,12 +227,13 @@ class MusicMode:
                     beat_delta = max(0.0, bass_energy - (self._bass_ema * 1.08))
                     self._beat_pulse = max(self._beat_pulse * 0.80, beat_delta * 4.8)
 
-                    transient_raw = self._onset_ema * 2.0 + spectral_flux * 2.8 + self._beat_pulse * 1.3
-                    transient_boost = np.clip(transient_raw, 0.0, 0.65)
+                    transient_raw = self._onset_ema * 2.2 + spectral_flux * 3.1 + self._beat_pulse * 1.5
+                    transient_boost = np.clip(transient_raw, 0.0, 0.85)
                     normalized = np.clip(normalized * (1.0 + transient_boost), 0.0, 1.0)
 
-                    attack = 0.78
-                    release = 0.86
+                    # Resposta mais rápida para bater junto com kick/snare.
+                    attack = 0.90
+                    release = 0.72
                     rising = normalized > self._smoothed
                     self._smoothed[rising] = (
                         self._smoothed[rising] * (1.0 - attack) + normalized[rising] * attack
@@ -297,13 +300,24 @@ class MusicMode:
                         cap_fraction = 1.0
                     active_dist = min(active_dist, max_dist * cap_fraction)
 
-                    # Paleta multicolorida: fria em calmaria, vibrante em batidas fortes.
-                    cool_c = [70.0, 120.0, 255.0]   # azul
-                    cool_m = [0.0, 235.0, 255.0]    # ciano
-                    cool_e = [50.0, 255.0, 155.0]   # verde-agua
-                    hot_c = [255.0, 60.0, 190.0]    # magenta
-                    hot_m = [255.0, 80.0, 70.0]     # vermelho
-                    hot_e = [255.0, 220.0, 45.0]    # amarelo/laranja
+                    # Nova direção visual: batida leve = azul; música agitada = vermelho puro.
+                    agitation = float(
+                        np.clip(
+                            frame_energy * 0.45 + transient_boost * 0.95 + self._beat_pulse * 1.25,
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    now = time.perf_counter()
+                    # Segura vermelho por alguns ms em batidas fortes para "punch" visual.
+                    if transient_boost > 0.62 or self._beat_pulse > 0.52:
+                        self._red_hold_until = max(self._red_hold_until, now + 0.12)
+                    hold_mix = 0.0
+                    if now < self._red_hold_until:
+                        hold_mix = min(1.0, (self._red_hold_until - now) / 0.12)
+
+                    low_color = [0.0, 95.0, 255.0]   # azul para batidas menos intensas
+                    high_color = [255.0, 0.0, 0.0]   # vermelho puro para alta agitação
 
                     pixels = self._pixels
                     for i in range(self.num_leds):
@@ -328,17 +342,17 @@ class MusicMode:
                             1.0,
                         )
 
-                        cool_color = self._tri_color(cool_c, cool_m, cool_e, pos)
-                        hot_color = self._tri_color(hot_c, hot_m, hot_e, pos)
-                        base_color = self._lerp_color(cool_color, hot_color, heat)
+                        # Centro um pouco mais brilhante, ponta mais escura.
+                        edge_dim = 1.0 - (pos * 0.28)
+                        base_color = self._lerp_color(low_color, high_color, agitation)
+                        if hold_mix > 0.0:
+                            base_color = self._lerp_color(base_color, high_color, hold_mix)
                         pixels[i][0] = base_color[0] * beam_strength
-                        pixels[i][1] = base_color[1] * beam_strength
-                        pixels[i][2] = base_color[2] * beam_strength
+                        pixels[i][1] = base_color[1] * beam_strength * edge_dim
+                        pixels[i][2] = base_color[2] * beam_strength * edge_dim
 
                     if not self.running:
                         break
-
-                    now = time.perf_counter()
 
                     if (
                         self.arduino
