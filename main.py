@@ -6,6 +6,9 @@ import time
 import pystray
 from pystray import MenuItem as item
 import sys
+import logging
+from logging.handlers import RotatingFileHandler
+from tkinter import TclError
 
 # Importando lógica do pacote core
 from core import ArduinoComm, PianoMode, MusicMode, EffectsMode
@@ -18,6 +21,24 @@ COLOR_TEXT = "#efeff4"
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_ICO_PATH = os.path.join(_APP_DIR, "assets", "logo.ico")
+LOG_DIR = os.path.join(_APP_DIR, "logs")
+LOG_PATH = os.path.join(LOG_DIR, "app.log")
+
+
+def setup_logging():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logger = logging.getLogger()
+    if logger.handlers:
+        return
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+
+
+def _handle_excepthook(exc_type, exc_value, exc_traceback):
+    logging.exception("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
 
 class LEDControllerApp(ctk.CTk):
@@ -57,10 +78,12 @@ class LEDControllerApp(ctk.CTk):
         self._ui_thread_id = threading.get_ident()
         self._led_update_lock = threading.Lock()
         self._pending_led_updates = {}
-        self._led_flush_job = None
+        self._led_poll_job = None
+        self._is_shutting_down = False
 
         self.setup_ui()
         self.slider.set(100)
+        self._led_poll_job = self.after(16, self.flush_pending_led_updates)
 
         self.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.create_tray_icon()
@@ -126,36 +149,52 @@ class LEDControllerApp(ctk.CTk):
 
     def update_led_canvas(self, led_id, color_hex):
         """Atualiza canvas de forma segura para chamadas vindas de threads."""
-        if not (0 <= led_id < self.num_leds):
+        if self._is_shutting_down or not (0 <= led_id < self.num_leds):
+            return
+        if len(self.led_drawings) != self.num_leds:
             return
         if threading.get_ident() == self._ui_thread_id:
-            self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
+            try:
+                self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
+            except TclError:
+                pass
             return
 
         with self._led_update_lock:
             self._pending_led_updates[led_id] = color_hex
-            if self._led_flush_job is None:
-                self._led_flush_job = self.after_idle(self.flush_pending_led_updates)
 
     def flush_pending_led_updates(self):
+        if self._is_shutting_down:
+            with self._led_update_lock:
+                self._pending_led_updates = {}
+            return
+        if len(self.led_drawings) != self.num_leds:
+            self._led_poll_job = self.after(16, self.flush_pending_led_updates)
+            return
         with self._led_update_lock:
             updates = self._pending_led_updates
             self._pending_led_updates = {}
-            self._led_flush_job = None
 
         for led_id, color_hex in updates.items():
             if 0 <= led_id < self.num_leds:
-                self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
+                try:
+                    self.led_canvas.itemconfig(self.led_drawings[led_id], fill=color_hex)
+                except TclError:
+                    return
+        self._led_poll_job = self.after(16, self.flush_pending_led_updates)
 
     def clear_led_simulator(self):
         """Volta o simulador ao estado inicial (LEDs apagados)."""
-        if len(self.led_drawings) != self.num_leds:
+        if self._is_shutting_down or len(self.led_drawings) != self.num_leds:
             return
         off = "#1a1a1a"
         with self._led_update_lock:
             self._pending_led_updates = {}
         for i in range(self.num_leds):
-            self.led_canvas.itemconfig(self.led_drawings[i], fill=off)
+            try:
+                self.led_canvas.itemconfig(self.led_drawings[i], fill=off)
+            except TclError:
+                return
 
     def clear_all_leds(self):
         if self.arduino.is_connected():
@@ -196,14 +235,30 @@ class LEDControllerApp(ctk.CTk):
         self.deiconify(); self.focus_force()
 
     def quit_application(self, icon=None, item=None):
+        self._is_shutting_down = True
         self.stop_watchdog = True
         if self._search_anim_job:
-            self.after_cancel(self._search_anim_job)
+            try:
+                self.after_cancel(self._search_anim_job)
+            except TclError:
+                pass
             self._search_anim_job = None
+        if self._led_poll_job:
+            try:
+                self.after_cancel(self._led_poll_job)
+            except TclError:
+                pass
+            self._led_poll_job = None
         if self.active_mode_obj: self.active_mode_obj.stop()
         self.arduino.close();
-        self.tray_icon.stop();
-        self.destroy();
+        try:
+            self.tray_icon.stop();
+        except Exception:
+            logging.exception("Failed to stop tray icon")
+        try:
+            self.destroy();
+        except TclError:
+            pass
         sys.exit()
 
     def _animate_search_status(self):
@@ -295,5 +350,11 @@ class LEDControllerApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    setup_logging()
+    sys.excepthook = _handle_excepthook
+    if hasattr(threading, "excepthook"):
+        def _thread_excepthook(args):
+            logging.exception("Unhandled thread exception", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        threading.excepthook = _thread_excepthook
     app = LEDControllerApp()
     app.mainloop()

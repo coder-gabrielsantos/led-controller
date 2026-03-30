@@ -1,6 +1,7 @@
 import threading
 import time
 import warnings
+import logging
 
 import numpy as np
 
@@ -52,6 +53,8 @@ class MusicMode:
         self._window = np.hanning(self.block_size)
         self._band_bin_ranges = self._build_band_ranges()
         self._band_weight = np.linspace(1.25, 0.95, self.num_leds, dtype=np.float32)
+        self._band_levels = np.zeros(self.num_leds, dtype=np.float32)
+        self._pixels = [[0.0, 0.0, 0.0] for _ in range(self.num_leds)]
 
         self._smoothed = np.zeros(self.num_leds, dtype=np.float32)
         self._dynamic_peak = 1.0
@@ -156,11 +159,11 @@ class MusicMode:
         try:
             loopback_mic = self._get_loopback_mic()
         except Exception as e:
-            print(f"Music Mode: falha ao acessar loopback de áudio: {e}")
+            logging.exception("Music Mode: falha ao acessar loopback de áudio")
             return
 
         if loopback_mic is None:
-            print("Music Mode: nenhum dispositivo de saída/loopback encontrado.")
+            logging.warning("Music Mode: nenhum dispositivo de saída/loopback encontrado.")
             return
 
         try:
@@ -179,7 +182,8 @@ class MusicMode:
 
                     spectrum = np.abs(np.fft.rfft(mono * self._window))
 
-                    band_levels = np.zeros(self.num_leds, dtype=np.float32)
+                    band_levels = self._band_levels
+                    band_levels.fill(0.0)
                     for i, (start, end) in enumerate(self._band_bin_ranges):
                         band_slice = spectrum[start:end]
                         if band_slice.size > 0:
@@ -213,7 +217,7 @@ class MusicMode:
                     spectral_flux = float(
                         np.mean(np.clip(above_floor - self._prev_above_floor, 0.0, None))
                     )
-                    self._prev_above_floor = above_floor.copy()
+                    np.copyto(self._prev_above_floor, above_floor)
 
                     bass_bins = max(6, int(self.num_leds * 0.22))
                     bass_energy = float(np.mean(normalized[:bass_bins]))
@@ -301,11 +305,13 @@ class MusicMode:
                     hot_m = [255.0, 80.0, 70.0]     # vermelho
                     hot_e = [255.0, 220.0, 45.0]    # amarelo/laranja
 
-                    pixels = []
+                    pixels = self._pixels
                     for i in range(self.num_leds):
                         dist = abs(i - center)
                         if dist > active_dist:
-                            pixels.append([0.0, 0.0, 0.0])
+                            pixels[i][0] = 0.0
+                            pixels[i][1] = 0.0
+                            pixels[i][2] = 0.0
                             continue
 
                         pos = dist / max(1e-6, active_dist)
@@ -325,11 +331,9 @@ class MusicMode:
                         cool_color = self._tri_color(cool_c, cool_m, cool_e, pos)
                         hot_color = self._tri_color(hot_c, hot_m, hot_e, pos)
                         base_color = self._lerp_color(cool_color, hot_color, heat)
-                        pixels.append([
-                            base_color[0] * beam_strength,
-                            base_color[1] * beam_strength,
-                            base_color[2] * beam_strength,
-                        ])
+                        pixels[i][0] = base_color[0] * beam_strength
+                        pixels[i][1] = base_color[1] * beam_strength
+                        pixels[i][2] = base_color[2] * beam_strength
 
                     if not self.running:
                         break
@@ -351,5 +355,5 @@ class MusicMode:
                         self._next_ui_ts = now + (1.0 / max(1, self.ui_fps))
 
                     # recorder.record já bloqueia por bloco; evitar sleep extra reduz latência.
-        except Exception as e:
-            print(f"Music Mode: erro durante captura/processamento de áudio: {e}")
+        except Exception:
+            logging.exception("Music Mode: erro durante captura/processamento de áudio")
