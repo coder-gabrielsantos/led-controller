@@ -7,6 +7,9 @@ import time
 
 NUM_LEDS = 88
 DEFAULT_MAX_BRIGHTNESS_PERCENT = 65
+LED_START_OFFSET = 1
+FRAME_HEADER_1 = 0xAA
+FRAME_HEADER_2 = 0x55
 
 # Descrição / fabricante típicos de Arduino e adaptadores USB-serial
 _PORT_KEYWORDS = (
@@ -134,11 +137,32 @@ class ArduinoComm:
                 return
             try:
                 factor = self.brightness_percent / 100.0
+                # Offset físico: mantém o primeiro LED da fita sempre apagado.
+                physical_pixels = [[0, 0, 0] for _ in range(LED_START_OFFSET)]
+                physical_pixels.extend(pixel_data[:NUM_LEDS])
+                if len(physical_pixels) < (NUM_LEDS + LED_START_OFFSET):
+                    missing = (NUM_LEDS + LED_START_OFFSET) - len(physical_pixels)
+                    physical_pixels.extend([[0, 0, 0] for _ in range(missing)])
+
+                payload = bytearray()
+                for r, g, b in physical_pixels:
+                    payload.append(int(max(0, min(255, r * factor))))
+                    payload.append(int(max(0, min(255, g * factor))))
+                    payload.append(int(max(0, min(255, b * factor))))
+
+                # Protocolo robusto:
+                # [0xAA][0x55][len_hi][len_lo][payload...][checksum]
+                payload_len = len(payload)
+                checksum = sum(payload) & 0xFF
+
                 packet = bytearray()
-                for r, g, b in pixel_data:
-                    packet.append(int(max(0, min(255, r * factor))))
-                    packet.append(int(max(0, min(255, g * factor))))
-                    packet.append(int(max(0, min(255, b * factor))))
+                packet.append(FRAME_HEADER_1)
+                packet.append(FRAME_HEADER_2)
+                packet.append((payload_len >> 8) & 0xFF)
+                packet.append(payload_len & 0xFF)
+                packet.extend(payload)
+                packet.append(checksum)
+
                 self.connection.write(packet)
             except (OSError, serial.SerialException) as e:
                 print(f"Erro de transmissão: {e}")
